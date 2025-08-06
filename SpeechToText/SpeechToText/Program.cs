@@ -67,7 +67,7 @@ namespace SpeechToTextRealtime
             var whisperFactory = WhisperFactory.FromPath(modelPath);
             _whisperProcessor = whisperFactory.CreateBuilder()
                 .WithLanguage("it") // Italiano
-                .WithThreads(Environment.ProcessorCount)
+                //.WithThreads(Environment.ProcessorCount)
                 //.WithSpeedup(true)
                 .Build();
 

@@ -53,4 +53,4 @@ CodeCoverage/
 TestResult.xml
 nunit-*.xml
 
-SpeechToText/models/**
+SpeechToText/SpeechToText/models/**

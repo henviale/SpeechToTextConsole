@@ -1,262 +1,251 @@
-﻿using Microsoft.ML.OnnxRuntime;
-using Microsoft.ML.OnnxRuntime.Tensors;
-using OpenTK.Audio.OpenAL;
-using System.Runtime.InteropServices;
+﻿using System;
+using System.IO;
+using System.Threading;
+using System.Threading.Tasks;
+using NAudio.Wave;
+using Whisper.net;
 
-namespace SpeechToTextConsole
+
+namespace SpeechToTextRealtime
 {
     class Program
     {
-        private static InferenceSession? _session;
-        private static ALCaptureDevice _captureDevice;
-        private static List<short> _audioBuffer = new List<short>();
+        private static WhisperProcessor? _whisperProcessor;
+        private static WaveInEvent? _waveIn;
+        private static MemoryStream _audioBuffer = new MemoryStream();
         private static readonly object _bufferLock = new object();
-        private static bool _isRecording = false;
-        private static Thread? _captureThread;
+        private static CancellationTokenSource _cancellationTokenSource = new CancellationTokenSource();
 
         static async Task Main(string[] args)
         {
-            Console.WriteLine("Speech to Text - .NET Core + ONNX (Cross-Platform)");
-            Console.WriteLine("====================================================");
-
-            // Rileva la piattaforma
-            DetectPlatform();
-
-            // Inizializza il modello ONNX
-            InitializeOnnxModel("whisper-tiny.onnx");
-
-            // Configura cattura audio cross-platform
-            SetupAudioCapture();
-
-            Console.WriteLine("Premi SPAZIO per iniziare/fermare la registrazione, ESC per uscire");
-
-            bool isRecording = false;
-
-            while (true)
-            {
-                var key = Console.ReadKey(true).Key;
-
-                if (key == ConsoleKey.Escape)
-                    break;
-
-                if (key == ConsoleKey.Spacebar)
-                {
-                    if (!isRecording)
-                    {
-                        StartRecording();
-                        Console.WriteLine("🎤 Registrazione avviata...");
-                        isRecording = true;
-                    }
-                    else
-                    {
-                        StopRecording();
-                        Console.WriteLine("⏹️ Registrazione fermata. Elaborazione...");
-
-                        // Processa l'audio catturato
-                        var text = await ProcessAudioBuffer();
-                        Console.WriteLine($"Testo: {text}");
-                        Console.WriteLine();
-
-                        isRecording = false;
-                    }
-                }
-            }
-
-            Cleanup();
-        }
-
-        static void DetectPlatform()
-        {
-            string platform = "Sconosciuto";
-            if (RuntimeInformation.IsOSPlatform(OSPlatform.Windows))
-                platform = "Windows";
-            else if (RuntimeInformation.IsOSPlatform(OSPlatform.OSX))
-                platform = "macOS";
-            else if (RuntimeInformation.IsOSPlatform(OSPlatform.Linux))
-                platform = "Linux";
-
-            Console.WriteLine($"🖥️  Piattaforma rilevata: {platform}");
-        }
-
-        static void InitializeOnnxModel(string modelPath)
-        {
+            Console.WriteLine("Inizializzazione Speech-to-Text in tempo reale...");
+            
             try
             {
-                var sessionOptions = new SessionOptions
+                // Inizializza Whisper
+                await InitializeWhisper();
+                
+                // Inizializza acquisizione audio
+                InitializeAudio();
+                
+                // Avvia il processing in tempo reale
+                _ = Task.Run(ProcessAudioContinuously, _cancellationTokenSource.Token);
+                
+                Console.WriteLine("Sistema attivo. Premi 'q' per uscire...");
+                Console.WriteLine("Parla nel microfono per vedere la trascrizione.");
+                
+                // Loop principale
+                while (true)
                 {
-                    EnableCpuMemArena = false,
-                    EnableMemoryPattern = false
-                };
-
-                _session = new InferenceSession(modelPath, sessionOptions);
-                Console.WriteLine($"✅ Modello ONNX caricato: {modelPath}");
-            }
-            catch (Exception ex)
-            {
-                Console.WriteLine($"❌ Errore nel caricare il modello: {ex.Message}");
-                Console.WriteLine("Scarica whisper-tiny.onnx da: https://github.com/openai/whisper");
-                Environment.Exit(1);
-            }
-        }
-
-        static void SetupAudioCapture()
-        {
-            try
-            {
-                // Lista dispositivi di input disponibili
-                var captureDevices = ALC.GetStringList(GetEnumerationStringList.CaptureDeviceSpecifier).ToList();
-
-                if (captureDevices?.Count() > 0)
-                {
-                    Console.WriteLine($"🎤 Dispositivo audio: {captureDevices[0]}");
-
-                    // Apri il dispositivo di cattura (16kHz, mono, 16-bit)
-                    _captureDevice = ALC.CaptureOpenDevice(captureDevices[0], 16000, ALFormat.Mono16, 4096);
-
-                    if (_captureDevice != IntPtr.Zero)
+                    var key = Console.ReadKey(true);
+                    if (key.KeyChar == 'q' || key.KeyChar == 'Q')
                     {
-                        Console.WriteLine("✅ Cattura audio configurata (16kHz mono, cross-platform)");
+                        break;
                     }
-                    else
-                    {
-                        throw new Exception("Impossibile aprire il dispositivo di cattura");
-                    }
-                }
-                else
-                {
-                    throw new Exception("Nessun dispositivo di input trovato");
                 }
             }
             catch (Exception ex)
             {
-                Console.WriteLine($"❌ Errore configurazione audio: {ex.Message}");
-                Environment.Exit(1);
+                Console.WriteLine($"Errore: {ex.Message}");
+            }
+            finally
+            {
+                Cleanup();
             }
         }
 
-        static void StartRecording()
+        private static async Task InitializeWhisper()
+        {
+            Console.WriteLine("Caricamento modello Whisper tiny...");
+            
+            // Verifica se il modello esiste
+            string modelPath = "models/ggml-tiny.bin";
+            if (!File.Exists(modelPath))
+            {
+                Console.WriteLine($"Modello non trovato in: {modelPath}");
+                Console.WriteLine("Scarica il modello Whisper tiny da:");
+                Console.WriteLine("https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-tiny.bin");
+                throw new FileNotFoundException("Modello Whisper non trovato");
+            }
+
+            var whisperFactory = WhisperFactory.FromPath(modelPath);
+            _whisperProcessor = whisperFactory.CreateBuilder()
+                .WithLanguage("it") // Italiano
+                .WithThreads(Environment.ProcessorCount)
+                //.WithSpeedup(true)
+                .Build();
+                
+            Console.WriteLine("Modello Whisper caricato con successo.");
+        }
+
+        private static void InitializeAudio()
+        {
+            Console.WriteLine("Inizializzazione acquisizione audio...");
+            
+            _waveIn = new WaveInEvent
+            {
+                WaveFormat = new WaveFormat(16000, 16, 1), // 16kHz, 16-bit, mono
+                BufferMilliseconds = 100 // Buffer di 100ms
+            };
+
+            _waveIn.DataAvailable += OnAudioDataAvailable;
+            _waveIn.RecordingStopped += OnRecordingStopped;
+            
+            _waveIn.StartRecording();
+            Console.WriteLine("Acquisizione audio avviata.");
+        }
+
+        private static void OnAudioDataAvailable(object? sender, WaveInEventArgs e)
         {
             lock (_bufferLock)
             {
-                _audioBuffer.Clear();
+                _audioBuffer.Write(e.Buffer, 0, e.BytesRecorded);
             }
-
-            _isRecording = true;
-            ALC.CaptureStart(_captureDevice);
-
-            // Avvia thread di cattura
-            _captureThread = new Thread(CaptureAudioLoop)
-            {
-                IsBackground = true
-            };
-            _captureThread.Start();
         }
 
-        static void StopRecording()
+        private static void OnRecordingStopped(object? sender, StoppedEventArgs e)
         {
-            _isRecording = false;
-            ALC.CaptureStop(_captureDevice);
-            _captureThread?.Join(1000); // Aspetta max 1 secondo
+            if (e.Exception != null)
+            {
+                Console.WriteLine($"Errore acquisizione audio: {e.Exception.Message}");
+            }
         }
 
-        static void CaptureAudioLoop()
+        private static async Task ProcessAudioContinuously()
         {
-            const int bufferSize = 1024;
-            short[] buffer = new short[bufferSize];
-
-            while (_isRecording)
+            const int chunkSizeBytes = 16000 * 2; // 1 secondo di audio (16kHz * 2 bytes per sample)
+            byte[] processingBuffer = new byte[chunkSizeBytes];
+            
+            while (!_cancellationTokenSource.Token.IsCancellationRequested)
             {
-                // CORREZIONE: Usa ALC.GetInteger con AlcGetInteger.CaptureSamples
-                int samplesAvailable = ALC.GetInteger(_captureDevice, AlcGetInteger.CaptureSamples);
-
-                if (samplesAvailable > 0)
+                try
                 {
-                    int samplesToRead = Math.Min(samplesAvailable, bufferSize);
-                    ALC.CaptureSamples(_captureDevice, buffer, samplesToRead);
-
+                    bool hasAudio = false;
+                    
                     lock (_bufferLock)
                     {
-                        for (int i = 0; i < samplesToRead; i++)
+                        if (_audioBuffer.Length >= chunkSizeBytes)
                         {
-                            _audioBuffer.Add(buffer[i]);
+                            _audioBuffer.Position = 0;
+                            int bytesRead = _audioBuffer.Read(processingBuffer, 0, chunkSizeBytes);
+                            
+                            // Rimuovi i dati processati dal buffer
+                            byte[] remaining = new byte[_audioBuffer.Length - bytesRead];
+                            _audioBuffer.Read(remaining, 0, remaining.Length);
+                            _audioBuffer.SetLength(0);
+                            _audioBuffer.Write(remaining, 0, remaining.Length);
+                            
+                            hasAudio = bytesRead == chunkSizeBytes;
                         }
                     }
-                }
 
-                Thread.Sleep(10); // Evita un loop troppo veloce
+                    if (hasAudio)
+                    {
+                        await ProcessAudioChunk(processingBuffer);
+                    }
+                    
+                    await Task.Delay(50, _cancellationTokenSource.Token); // 50ms di pausa
+                }
+                catch (OperationCanceledException)
+                {
+                    break;
+                }
+                catch (Exception ex)
+                {
+                    Console.WriteLine($"Errore processing audio: {ex.Message}");
+                    await Task.Delay(1000, _cancellationTokenSource.Token);
+                }
             }
         }
 
-        static async Task<string> ProcessAudioBuffer()
+        private static async Task ProcessAudioChunk(byte[] audioData)
         {
             try
             {
-                float[] audioData;
+                // Converti byte[] in float[] per Whisper
+                float[] audioSamples = ConvertBytesToFloats(audioData);
+                
+                // Verifica se c'è abbastanza energia audio (evita processing del silenzio)
+                if (!HasSufficientAudioEnergy(audioSamples))
+                    return;
 
-                lock (_bufferLock)
+                // Process con Whisper
+                await foreach (var segment in _whisperProcessor.ProcessAsync(audioSamples))
                 {
-                    var samples = _audioBuffer.ToArray();
-                    audioData = ConvertSamplesToFloat(samples);
+                    if (!string.IsNullOrWhiteSpace(segment.Text))
+                    {
+                        Console.WriteLine($"[{DateTime.Now:HH:mm:ss}] {segment.Text.Trim()}");
+                    }
                 }
-
-                if (audioData.Length == 0)
-                    return "[Nessun audio catturato]";
-
-                // Prepara input per Whisper
-                var inputTensor = new DenseTensor<float>(audioData, new[] { 1, audioData.Length });
-                var inputs = new List<NamedOnnxValue>
-                {
-                    NamedOnnxValue.CreateFromTensor("audio", inputTensor)
-                };
-
-                // Esegui inferenza
-                using var results = await Task.Run(() => _session!.Run(inputs));
-
-                // Estrai il testo dall'output
-                var outputTensor = results.FirstOrDefault()?.AsTensor<long>();
-                if (outputTensor != null)
-                {
-                    return DecodeTokens(outputTensor.ToArray());
-                }
-
-                return "[Errore nell'elaborazione]";
             }
             catch (Exception ex)
             {
-                return $"[Errore: {ex.Message}]";
+                Console.WriteLine($"Errore trascrizione: {ex.Message}");
             }
         }
 
-        static float[] ConvertSamplesToFloat(short[] samples)
+        private static float[] ConvertBytesToFloats(byte[] audioBytes)
         {
-            var floats = new float[samples.Length];
-            for (int i = 0; i < samples.Length; i++)
+            float[] floats = new float[audioBytes.Length / 2]; // 16-bit = 2 bytes per sample
+            
+            for (int i = 0; i < floats.Length; i++)
             {
-                floats[i] = samples[i] / 32768f; // Normalizza a [-1, 1]
+                short sample = BitConverter.ToInt16(audioBytes, i * 2);
+                floats[i] = sample / 32768.0f; // Normalizza a [-1.0, 1.0]
             }
+            
             return floats;
         }
 
-        static string DecodeTokens(long[] tokens)
+        private static bool HasSufficientAudioEnergy(float[] samples)
         {
-            // Implementazione semplificata del decoder
-            // In una versione completa, dovresti usare il tokenizer di Whisper
-            var text = string.Join("", tokens.Select(t => ((char)t).ToString()));
-            return text.Trim();
+            const float energyThreshold = 0.001f;
+            
+            double energy = 0;
+            foreach (var sample in samples)
+            {
+                energy += sample * sample;
+            }
+            
+            double rms = Math.Sqrt(energy / samples.Length);
+            return rms > energyThreshold;
         }
 
-        static void Cleanup()
+        private static void Cleanup()
         {
-            _isRecording = false;
-            _captureThread?.Join(1000);
+            Console.WriteLine("\nChiusura in corso...");
+            
+            _cancellationTokenSource.Cancel();
+            
+            _waveIn?.StopRecording();
+            _waveIn?.Dispose();
+            
+            _whisperProcessor?.Dispose();
+            _audioBuffer?.Dispose();
+            
+            Console.WriteLine("Risorse liberate.");
+        }
+    }
 
-            if (_captureDevice != IntPtr.Zero)
-            {
-                ALC.CaptureCloseDevice(_captureDevice);
-            }
+    // Classe di supporto per Sherpa ONNX (implementazione semplificata)
+    public class SherpaOnnxRecognizer
+    {
+        public static SherpaOnnxRecognizer Create(string modelPath)
+        {
+            // Implementazione placeholder per Sherpa ONNX
+            // In una implementazione reale, qui caricheresti il modello ONNX
+            return new SherpaOnnxRecognizer();
+        }
 
-            _session?.Dispose();
-            Console.WriteLine("Risorse rilasciate.");
+        public string Recognize(float[] audioSamples)
+        {
+            // Placeholder - implementa la logica di riconoscimento Sherpa ONNX
+            return string.Empty;
+        }
+
+        public void Dispose()
+        {
+            // Cleanup risorse Sherpa ONNX
         }
     }
 }

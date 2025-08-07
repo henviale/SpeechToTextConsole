@@ -55,20 +55,22 @@ namespace SpeechToTextRealtime
             Console.WriteLine("Caricamento modello Whisper tiny...");
 
             // Verifica se il modello esiste
-            string modelPath = "models/ggml-tiny.bin";
+            string modelPath = "models/ggml-small.bin";
             if (!File.Exists(modelPath))
             {
                 Console.WriteLine($"Modello non trovato in: {modelPath}");
                 Console.WriteLine("Scarica il modello Whisper tiny da:");
-                Console.WriteLine("https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-tiny.bin");
+                Console.WriteLine("https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-small.bin");
                 throw new FileNotFoundException("Modello Whisper non trovato");
             }
 
             var whisperFactory = WhisperFactory.FromPath(modelPath);
             _whisperProcessor = whisperFactory.CreateBuilder()
                 .WithLanguage("it") // Italiano
-                                    //.WithThreads(Environment.ProcessorCount)
-                                    //.WithSpeedup(true)
+                .WithTemperature(0)
+
+                //.WithThreads(Environment.ProcessorCount)
+                //.WithSpeedup(true)
                 .Build();
 
             Console.WriteLine("Modello Whisper caricato con successo.");
@@ -109,7 +111,8 @@ namespace SpeechToTextRealtime
 
         private static async Task ProcessAudioContinuously()
         {
-            const int chunkSizeBytes = 16000 * 2 * 5; // 3 secondi invece di 1
+            const int chunkSizeBytes = 16000 * 2 * 5;  // 5 secondi
+            const int stepSizeBytes = 16000 * 2 * 3;   // Avanza di 3 secondi
             byte[] processingBuffer = new byte[chunkSizeBytes];
 
             while (!_cancellationTokenSource.Token.IsCancellationRequested)
@@ -123,33 +126,30 @@ namespace SpeechToTextRealtime
                         if (_audioBuffer.Length >= chunkSizeBytes)
                         {
                             _audioBuffer.Position = 0;
-                            int bytesRead = _audioBuffer.Read(processingBuffer, 0, chunkSizeBytes);
+                            _audioBuffer.Read(processingBuffer, 0, chunkSizeBytes);
 
-                            // Rimuovi i dati processati dal buffer
-                            byte[] remaining = new byte[_audioBuffer.Length - bytesRead];
+                            // Rimuovi solo stepSizeBytes (non tutto il chunk)
+                            byte[] remaining = new byte[_audioBuffer.Length - stepSizeBytes];
+                            _audioBuffer.Position = stepSizeBytes;
                             _audioBuffer.Read(remaining, 0, remaining.Length);
+
                             _audioBuffer.SetLength(0);
                             _audioBuffer.Write(remaining, 0, remaining.Length);
 
-                            hasAudio = bytesRead == chunkSizeBytes;
+                            hasAudio = true;
                         }
                     }
 
                     if (hasAudio)
                     {
-                        await ProcessAudioChunk(processingBuffer);
+                        await ProcessAudioChunk(processingBuffer); // Fuori dal lock
                     }
 
-                    await Task.Delay(50, _cancellationTokenSource.Token); // 50ms di pausa
+                    await Task.Delay(500, _cancellationTokenSource.Token);
                 }
                 catch (OperationCanceledException)
                 {
                     break;
-                }
-                catch (Exception ex)
-                {
-                    Console.WriteLine($"Errore processing audio: {ex.Message}");
-                    await Task.Delay(1000, _cancellationTokenSource.Token);
                 }
             }
         }
@@ -182,15 +182,28 @@ namespace SpeechToTextRealtime
 
         private static float[] ConvertBytesToFloats(byte[] audioBytes)
         {
-            float[] floats = new float[audioBytes.Length / 2]; // 16-bit = 2 bytes per sample
+            float[] floats = new float[audioBytes.Length / 2];
 
             for (int i = 0; i < floats.Length; i++)
             {
                 short sample = BitConverter.ToInt16(audioBytes, i * 2);
-                floats[i] = sample / 32768.0f; // Normalizza a [-1.0, 1.0]
+                floats[i] = sample / 32768.0f;
             }
 
-            return floats;
+            // Normalizzazione volume
+            return NormalizeAudio(floats);
+        }
+
+        private static float[] NormalizeAudio(float[] samples)
+        {
+            float max = samples.Max(Math.Abs);
+            if (max > 0.1f)
+            {
+                float factor = 0.8f / max;
+                for (int i = 0; i < samples.Length; i++)
+                    samples[i] *= factor;
+            }
+            return samples;
         }
 
         private static bool HasSufficientAudioEnergy(float[] samples)

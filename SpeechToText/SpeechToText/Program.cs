@@ -67,8 +67,8 @@ namespace SpeechToTextRealtime
             var whisperFactory = WhisperFactory.FromPath(modelPath);
             _whisperProcessor = whisperFactory.CreateBuilder()
                 .WithLanguage("it") // Italiano
-                //.WithThreads(Environment.ProcessorCount)
-                //.WithSpeedup(true)
+                                    //.WithThreads(Environment.ProcessorCount)
+                                    //.WithSpeedup(true)
                 .Build();
 
             Console.WriteLine("Modello Whisper caricato con successo.");
@@ -109,7 +109,7 @@ namespace SpeechToTextRealtime
 
         private static async Task ProcessAudioContinuously()
         {
-            const int chunkSizeBytes = 16000 * 2; // 1 secondo di audio (16kHz * 2 bytes per sample)
+            const int chunkSizeBytes = 16000 * 2 * 5; // 3 secondi invece di 1
             byte[] processingBuffer = new byte[chunkSizeBytes];
 
             while (!_cancellationTokenSource.Token.IsCancellationRequested)

@@ -3,18 +3,31 @@ using System.IO;
 using System.Threading;
 using System.Threading.Tasks;
 using System.Linq;
-using System.Diagnostics;
 using Whisper.net;
+
+#if WINDOWS
+using NAudio.Wave;
+using NAudio.CoreAudioApi;
+#elif MACOS
+using PortAudioSharp;
+#endif
 
 namespace SpeechToTextRealtime
 {
     class Program
     {
         private static WhisperProcessor? _whisperProcessor;
-        private static Process? _recordingProcess;
         private static MemoryStream _audioBuffer = new MemoryStream();
         private static readonly object _bufferLock = new object();
         private static CancellationTokenSource _cancellationTokenSource = new CancellationTokenSource();
+
+#if WINDOWS
+        private static WaveInEvent? _waveIn;
+#elif MACOS
+        private static PortAudio.Stream? _audioStream;
+        private const int SampleRate = 16000;
+        private const int BufferFrames = 1024;
+#endif
 
         static void Main(string[] args)
         {
@@ -22,26 +35,19 @@ namespace SpeechToTextRealtime
 
             try
             {
-                // Inizializza Whisper
                 InitializeWhisper();
-
-                // Inizializza acquisizione audio
                 InitializeAudio();
 
-                // Avvia il processing in tempo reale
                 _ = Task.Run(ProcessAudioContinuously, _cancellationTokenSource.Token);
 
                 Console.WriteLine("Sistema attivo. Premi 'q' per uscire...");
                 Console.WriteLine("Parla nel microfono per vedere la trascrizione.");
 
-                // Loop principale
                 while (true)
                 {
                     var key = Console.ReadKey(true);
                     if (key.KeyChar == 'q' || key.KeyChar == 'Q')
-                    {
                         break;
-                    }
                 }
             }
             catch (Exception ex)
@@ -56,15 +62,12 @@ namespace SpeechToTextRealtime
 
         private static void InitializeWhisper()
         {
-            Console.WriteLine("Caricamento modello Whisper tiny...");
+            Console.WriteLine("Caricamento modello Whisper...");
 
             string modelPath = "models/ggml-small.bin";
             if (!File.Exists(modelPath))
             {
-                Console.WriteLine($"Modello non trovato in: {modelPath}");
-                Console.WriteLine("Scarica il modello Whisper tiny da:");
-                Console.WriteLine("https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-small.bin");
-                throw new FileNotFoundException("Modello Whisper non trovato");
+                throw new FileNotFoundException("Modello Whisper non trovato in: " + modelPath);
             }
 
             var whisperFactory = WhisperFactory.FromPath(modelPath);
@@ -73,87 +76,104 @@ namespace SpeechToTextRealtime
                 .WithTemperature(0)
                 .Build();
 
-            Console.WriteLine("Modello Whisper caricato con successo.");
+            Console.WriteLine("Modello Whisper caricato.");
         }
 
         private static void InitializeAudio()
         {
-            Console.WriteLine("Inizializzazione acquisizione audio...");
-
-            // Per NetCoreAudio, dovrai implementare la cattura usando i tool nativi
-            // oppure usare una libreria come CSCore (Windows) o altre alternative
-
-            // Alternativa semplice: usa gli strumenti del sistema operativo
-            string command, arguments;
-
-            if (OperatingSystem.IsWindows())
-            {
-                // Windows: installa ffmpeg da https://ffmpeg.org/download.html
-                command = "ffmpeg";
-                arguments = "-f dshow -i audio=\"Microphone\" -ar 16000 -ac 1 -f s16le pipe:1";
-            }
-            else if (OperatingSystem.IsMacOS())
-            {
-                // macOS: brew install sox
-                command = "sox";
-                arguments = "-d -r 16000 -c 1 -b 16 -e signed-integer -t raw -";
-            }
-            else
-            {
-                // Linux: pre-installato in molte distro
-                command = "arecord";
-                arguments = "-f S16_LE -r 16000 -c 1";
-            }
-
-            try
-            {
-                var startInfo = new ProcessStartInfo
-                {
-                    FileName = command,
-                    Arguments = arguments,
-                    UseShellExecute = false,
-                    RedirectStandardOutput = true,
-                    RedirectStandardError = true,
-                    CreateNoWindow = true
-                };
-
-                _recordingProcess = new Process { StartInfo = startInfo };
-                _recordingProcess.OutputDataReceived += OnAudioDataReceived;
-                _recordingProcess.ErrorDataReceived += OnErrorReceived;
-
-                _recordingProcess.Start();
-                _recordingProcess.BeginOutputReadLine();
-                _recordingProcess.BeginErrorReadLine();
-
-                Console.WriteLine($"Acquisizione audio avviata usando: {command}");
-            }
-            catch (Exception ex)
-            {
-                throw new Exception($"Errore inizializzazione audio. Installa {command}: {ex.Message}");
-            }
+#if WINDOWS
+            InitializeWindowsAudio();
+#elif MACOS
+            InitializeMacOSAudio();
+#else
+            throw new PlatformNotSupportedException("Piattaforma non supportata");
+#endif
         }
 
-        private static void OnAudioDataReceived(object sender, DataReceivedEventArgs e)
+#if WINDOWS
+        private static void InitializeWindowsAudio()
         {
-            if (e.Data != null && e.Data.Length > 0)
-            {
-                // Converte la stringa in byte array (assumendo raw audio data)
-                byte[] audioBytes = System.Text.Encoding.Latin1.GetBytes(e.Data);
+            Console.WriteLine("Inizializzazione NAudio (Windows)...");
 
-                lock (_bufferLock)
+            _waveIn = new WaveInEvent
+            {
+                WaveFormat = new WaveFormat(16000, 16, 1), // 16kHz, 16-bit, mono
+                BufferMilliseconds = 100
+            };
+
+            _waveIn.DataAvailable += OnWindowsAudioDataReceived;
+            _waveIn.RecordingStopped += (s, e) =>
+            {
+                if (e.Exception != null)
+                    Console.WriteLine($"Errore registrazione: {e.Exception.Message}");
+            };
+
+            _waveIn.StartRecording();
+            Console.WriteLine("Acquisizione audio NAudio avviata.");
+        }
+
+        private static void OnWindowsAudioDataReceived(object? sender, WaveInEventArgs e)
+        {
+            lock (_bufferLock)
+            {
+                _audioBuffer.Write(e.Buffer, 0, e.BytesRecorded);
+            }
+        }
+#endif
+
+#if MACOS
+        private static void InitializeMacOSAudio()
+        {
+            Console.WriteLine("Inizializzazione PortAudio (macOS)...");
+
+            PortAudio.Initialize();
+
+            var inputParams = new PortAudio.StreamParameters
+            {
+                device = PortAudio.DefaultInputDevice,
+                channelCount = 1,
+                sampleFormat = PortAudio.SampleFormat.Float32,
+                suggestedLatency = PortAudio.GetDeviceInfo(PortAudio.DefaultInputDevice).defaultLowInputLatency
+            };
+
+            _audioStream = new PortAudio.Stream(
+                inputParams, null, SampleRate, BufferFrames,
+                PortAudio.StreamFlags.ClipOff, OnMacOSAudioCallback, IntPtr.Zero);
+
+            _audioStream.Start();
+            Console.WriteLine("Acquisizione audio PortAudio avviata.");
+        }
+
+        private static PortAudio.StreamCallbackResult OnMacOSAudioCallback(
+            IntPtr input, IntPtr output, uint frameCount,
+            ref PortAudio.StreamCallbackTimeInfo timeInfo,
+            PortAudio.StreamCallbackFlags statusFlags, IntPtr userData)
+        {
+            if (input != IntPtr.Zero)
+            {
+                unsafe
                 {
-                    _audioBuffer.Write(audioBytes, 0, audioBytes.Length);
+                    float* inputSamples = (float*)input;
+                    byte[] audioData = new byte[frameCount * sizeof(float)];
+                    
+                    for (int i = 0; i < frameCount; i++)
+                    {
+                        short sample = (short)(inputSamples[i] * 32767f);
+                        byte[] sampleBytes = BitConverter.GetBytes(sample);
+                        audioData[i * 2] = sampleBytes[0];
+                        audioData[i * 2 + 1] = sampleBytes[1];
+                    }
+
+                    lock (_bufferLock)
+                    {
+                        _audioBuffer.Write(audioData, 0, audioData.Length);
+                    }
                 }
             }
-        }
 
-        private static void OnErrorReceived(object sender, DataReceivedEventArgs e)
-        {
-            if (!string.IsNullOrEmpty(e.Data))
-            {
-                Console.WriteLine($"Audio error: {e.Data}");
-            }
+            return PortAudio.StreamCallbackResult.Continue;
         }
+#endif
 
         private static async Task ProcessAudioContinuously()
         {
@@ -267,22 +287,14 @@ namespace SpeechToTextRealtime
 
             _cancellationTokenSource.Cancel();
 
-            if (_recordingProcess != null && !_recordingProcess.HasExited)
-            {
-                try
-                {
-                    _recordingProcess.Kill();
-                    _recordingProcess.WaitForExit(2000);
-                }
-                catch (Exception ex)
-                {
-                    Console.WriteLine($"Errore chiusura processo: {ex.Message}");
-                }
-                finally
-                {
-                    _recordingProcess?.Dispose();
-                }
-            }
+#if WINDOWS
+            _waveIn?.StopRecording();
+            _waveIn?.Dispose();
+#elif MACOS
+            _audioStream?.Stop();
+            _audioStream?.Dispose();
+            PortAudio.Terminate();
+#endif
 
             _whisperProcessor?.Dispose();
             _audioBuffer?.Dispose();

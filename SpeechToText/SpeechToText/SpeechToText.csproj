@@ -9,12 +9,26 @@
     <RootNamespace>SpeechToTextRealtime</RootNamespace>
   </PropertyGroup>
 
+	<PropertyGroup Condition="$([MSBuild]::IsOSPlatform('Windows'))">
+		<DefineConstants>$(DefineConstants);WINDOWS</DefineConstants>
+	</PropertyGroup>
+
+	<PropertyGroup Condition="$([MSBuild]::IsOSPlatform('OSX'))">
+		<DefineConstants>$(DefineConstants);MACOS</DefineConstants>
+		<AllowUnsafeBlocks>true</AllowUnsafeBlocks>
+	</PropertyGroup>
+
   <ItemGroup>
-    <PackageReference Include="NetCoreAudio" Version="2.0.0" />
     <PackageReference Include="Whisper.net" Version="1.8.1" />
     <PackageReference Include="Whisper.net.Runtime" Version="1.8.1" />
-  </ItemGroup>
 
+
+	<PackageReference Include="NAudio" Version="2.2.1" Condition="$([MSBuild]::IsOSPlatform('Windows'))" />
+
+	<!-- Solo per macOS -->
+	<PackageReference Include="PortAudioSharp" Version="1.0.0" Condition="$([MSBuild]::IsOSPlatform('OSX'))" />
+  </ItemGroup>
+	
   <ItemGroup>
     <None Include="models\**" CopyToOutputDirectory="PreserveNewest" />
   </ItemGroup>

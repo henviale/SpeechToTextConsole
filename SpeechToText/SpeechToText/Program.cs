@@ -1,13 +1,17 @@
-﻿using NAudio.Wave;
+﻿using System;
+using System.IO;
+using System.Threading;
+using System.Threading.Tasks;
+using System.Linq;
+using System.Diagnostics;
 using Whisper.net;
-
 
 namespace SpeechToTextRealtime
 {
     class Program
     {
         private static WhisperProcessor? _whisperProcessor;
-        private static WaveInEvent? _waveIn;
+        private static Process? _recordingProcess;
         private static MemoryStream _audioBuffer = new MemoryStream();
         private static readonly object _bufferLock = new object();
         private static CancellationTokenSource _cancellationTokenSource = new CancellationTokenSource();
@@ -54,7 +58,6 @@ namespace SpeechToTextRealtime
         {
             Console.WriteLine("Caricamento modello Whisper tiny...");
 
-            // Verifica se il modello esiste
             string modelPath = "models/ggml-small.bin";
             if (!File.Exists(modelPath))
             {
@@ -66,11 +69,8 @@ namespace SpeechToTextRealtime
 
             var whisperFactory = WhisperFactory.FromPath(modelPath);
             _whisperProcessor = whisperFactory.CreateBuilder()
-                .WithLanguage("it") // Italiano
+                .WithLanguage("it")
                 .WithTemperature(0)
-
-                //.WithThreads(Environment.ProcessorCount)
-                //.WithSpeedup(true)
                 .Build();
 
             Console.WriteLine("Modello Whisper caricato con successo.");
@@ -80,32 +80,78 @@ namespace SpeechToTextRealtime
         {
             Console.WriteLine("Inizializzazione acquisizione audio...");
 
-            _waveIn = new WaveInEvent
+            // Per NetCoreAudio, dovrai implementare la cattura usando i tool nativi
+            // oppure usare una libreria come CSCore (Windows) o altre alternative
+
+            // Alternativa semplice: usa gli strumenti del sistema operativo
+            string command, arguments;
+
+            if (OperatingSystem.IsWindows())
             {
-                WaveFormat = new WaveFormat(16000, 16, 1), // 16kHz, 16-bit, mono
-                BufferMilliseconds = 100 // Buffer di 100ms
-            };
-
-            _waveIn.DataAvailable += OnAudioDataAvailable;
-            _waveIn.RecordingStopped += OnRecordingStopped;
-
-            _waveIn.StartRecording();
-            Console.WriteLine("Acquisizione audio avviata.");
-        }
-
-        private static void OnAudioDataAvailable(object? sender, WaveInEventArgs e)
-        {
-            lock (_bufferLock)
+                // Windows: installa ffmpeg da https://ffmpeg.org/download.html
+                command = "ffmpeg";
+                arguments = "-f dshow -i audio=\"Microphone\" -ar 16000 -ac 1 -f s16le pipe:1";
+            }
+            else if (OperatingSystem.IsMacOS())
             {
-                _audioBuffer.Write(e.Buffer, 0, e.BytesRecorded);
+                // macOS: brew install sox
+                command = "sox";
+                arguments = "-d -r 16000 -c 1 -b 16 -e signed-integer -t raw -";
+            }
+            else
+            {
+                // Linux: pre-installato in molte distro
+                command = "arecord";
+                arguments = "-f S16_LE -r 16000 -c 1";
+            }
+
+            try
+            {
+                var startInfo = new ProcessStartInfo
+                {
+                    FileName = command,
+                    Arguments = arguments,
+                    UseShellExecute = false,
+                    RedirectStandardOutput = true,
+                    RedirectStandardError = true,
+                    CreateNoWindow = true
+                };
+
+                _recordingProcess = new Process { StartInfo = startInfo };
+                _recordingProcess.OutputDataReceived += OnAudioDataReceived;
+                _recordingProcess.ErrorDataReceived += OnErrorReceived;
+
+                _recordingProcess.Start();
+                _recordingProcess.BeginOutputReadLine();
+                _recordingProcess.BeginErrorReadLine();
+
+                Console.WriteLine($"Acquisizione audio avviata usando: {command}");
+            }
+            catch (Exception ex)
+            {
+                throw new Exception($"Errore inizializzazione audio. Installa {command}: {ex.Message}");
             }
         }
 
-        private static void OnRecordingStopped(object? sender, StoppedEventArgs e)
+        private static void OnAudioDataReceived(object sender, DataReceivedEventArgs e)
         {
-            if (e.Exception != null)
+            if (e.Data != null && e.Data.Length > 0)
             {
-                Console.WriteLine($"Errore acquisizione audio: {e.Exception.Message}");
+                // Converte la stringa in byte array (assumendo raw audio data)
+                byte[] audioBytes = System.Text.Encoding.Latin1.GetBytes(e.Data);
+
+                lock (_bufferLock)
+                {
+                    _audioBuffer.Write(audioBytes, 0, audioBytes.Length);
+                }
+            }
+        }
+
+        private static void OnErrorReceived(object sender, DataReceivedEventArgs e)
+        {
+            if (!string.IsNullOrEmpty(e.Data))
+            {
+                Console.WriteLine($"Audio error: {e.Data}");
             }
         }
 
@@ -128,7 +174,6 @@ namespace SpeechToTextRealtime
                             _audioBuffer.Position = 0;
                             _audioBuffer.Read(processingBuffer, 0, chunkSizeBytes);
 
-                            // Rimuovi solo stepSizeBytes (non tutto il chunk)
                             byte[] remaining = new byte[_audioBuffer.Length - stepSizeBytes];
                             _audioBuffer.Position = stepSizeBytes;
                             _audioBuffer.Read(remaining, 0, remaining.Length);
@@ -142,7 +187,7 @@ namespace SpeechToTextRealtime
 
                     if (hasAudio)
                     {
-                        await ProcessAudioChunk(processingBuffer); // Fuori dal lock
+                        await ProcessAudioChunk(processingBuffer);
                     }
 
                     await Task.Delay(500, _cancellationTokenSource.Token);
@@ -158,14 +203,11 @@ namespace SpeechToTextRealtime
         {
             try
             {
-                // Converti byte[] in float[] per Whisper
                 float[] audioSamples = ConvertBytesToFloats(audioData);
 
-                // Verifica se c'è abbastanza energia audio (evita processing del silenzio)
                 if (!HasSufficientAudioEnergy(audioSamples))
                     return;
 
-                // Process con Whisper
                 await foreach (var segment in _whisperProcessor!.ProcessAsync(audioSamples))
                 {
                     if (!string.IsNullOrWhiteSpace(segment.Text))
@@ -190,7 +232,6 @@ namespace SpeechToTextRealtime
                 floats[i] = sample / 32768.0f;
             }
 
-            // Normalizzazione volume
             return NormalizeAudio(floats);
         }
 
@@ -226,14 +267,28 @@ namespace SpeechToTextRealtime
 
             _cancellationTokenSource.Cancel();
 
-            _waveIn?.StopRecording();
-            _waveIn?.Dispose();
+            if (_recordingProcess != null && !_recordingProcess.HasExited)
+            {
+                try
+                {
+                    _recordingProcess.Kill();
+                    _recordingProcess.WaitForExit(2000);
+                }
+                catch (Exception ex)
+                {
+                    Console.WriteLine($"Errore chiusura processo: {ex.Message}");
+                }
+                finally
+                {
+                    _recordingProcess?.Dispose();
+                }
+            }
 
             _whisperProcessor?.Dispose();
             _audioBuffer?.Dispose();
+            _cancellationTokenSource?.Dispose();
 
             Console.WriteLine("Risorse liberate.");
         }
     }
 }
-

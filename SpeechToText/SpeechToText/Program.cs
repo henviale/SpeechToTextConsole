@@ -64,7 +64,7 @@ namespace SpeechToTextRealtime
         {
             Console.WriteLine("Caricamento modello Whisper...");
 
-            string modelPath = "models/ggml-tiny.bin";
+            string modelPath = "models/ggml-small.bin";
             if (!File.Exists(modelPath))
             {
                 throw new FileNotFoundException("Modello Whisper non trovato in: " + modelPath);
@@ -154,14 +154,18 @@ namespace SpeechToTextRealtime
                 unsafe
                 {
                     float* inputSamples = (float*)input;
-                    byte[] audioData = new byte[frameCount * sizeof(float)];
+                    // Correzione: int16 = 2 bytes, non 4
+                    byte[] audioData = new byte[frameCount * 2]; // 2 bytes per sample
                     
                     for (int i = 0; i < frameCount; i++)
                     {
-                        short sample = (short)(inputSamples[i] * 32767f);
-                        byte[] sampleBytes = BitConverter.GetBytes(sample);
-                        audioData[i * 2] = sampleBytes[0];
-                        audioData[i * 2 + 1] = sampleBytes[1];
+                        // Migliore conversione float32 → int16
+                        float sample = Math.Max(-1.0f, Math.Min(1.0f, inputSamples[i])); // Clamp
+                        short int16Sample = (short)(sample * 32767f);
+                        
+                        // Correzione endianness (little endian)
+                        audioData[i * 2] = (byte)(int16Sample & 0xFF);
+                        audioData[i * 2 + 1] = (byte)(int16Sample >> 8);
                     }
 
                     lock (_bufferLock)

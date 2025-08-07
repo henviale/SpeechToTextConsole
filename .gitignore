@@ -55,4 +55,4 @@ nunit-*.xml
 
 SpeechToText/SpeechToText/models/**
 
-SpeechToText/.vs/** */
+SpeechToText/.vs/**

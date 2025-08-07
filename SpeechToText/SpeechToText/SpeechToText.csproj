@@ -31,6 +31,7 @@
 	
   <ItemGroup>
     <None Include="models\**" CopyToOutputDirectory="PreserveNewest" />
+    <None Include="libportaudio.dylib" CopyToOutputDirectory="PreserveNewest" />
   </ItemGroup>
 
 </Project>

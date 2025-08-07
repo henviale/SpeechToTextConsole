@@ -22,9 +22,9 @@ namespace SpeechToTextRealtime
         private static CancellationTokenSource _cancellationTokenSource = new CancellationTokenSource();
 
 #if WINDOWS
-        private static WaveInEvent? _waveIn;
+        private static WaveInEvent? _waveIn; 
 #elif MACOS
-        private static PortAudio.Stream? _audioStream;
+        private static PortAudioSharp.Stream? _audioStream;
         private const int SampleRate = 16000;
         private const int BufferFrames = 1024;
 #endif
@@ -64,7 +64,7 @@ namespace SpeechToTextRealtime
         {
             Console.WriteLine("Caricamento modello Whisper...");
 
-            string modelPath = "models/ggml-small.bin";
+            string modelPath = "models/ggml-tiny.bin";
             if (!File.Exists(modelPath))
             {
                 throw new FileNotFoundException("Modello Whisper non trovato in: " + modelPath);
@@ -128,26 +128,26 @@ namespace SpeechToTextRealtime
 
             PortAudio.Initialize();
 
-            var inputParams = new PortAudio.StreamParameters
+            var inputParams = new PortAudioSharp.StreamParameters
             {
                 device = PortAudio.DefaultInputDevice,
-                channelCount = 1,
-                sampleFormat = PortAudio.SampleFormat.Float32,
-                suggestedLatency = PortAudio.GetDeviceInfo(PortAudio.DefaultInputDevice).defaultLowInputLatency
+                channelCount = 1, // Mono
+                sampleFormat = PortAudioSharp.SampleFormat.Float32,
+                suggestedLatency = PortAudio.GetDeviceInfo(PortAudio.DefaultOutputDevice).defaultLowInputLatency
             };
 
-            _audioStream = new PortAudio.Stream(
+            _audioStream = new PortAudioSharp.Stream(
                 inputParams, null, SampleRate, BufferFrames,
-                PortAudio.StreamFlags.ClipOff, OnMacOSAudioCallback, IntPtr.Zero);
+                PortAudioSharp.StreamFlags.ClipOff, OnMacOSAudioCallback, IntPtr.Zero);
 
-            _audioStream.Start();
+            _audioStream?.Start();
             Console.WriteLine("Acquisizione audio PortAudio avviata.");
         }
 
-        private static PortAudio.StreamCallbackResult OnMacOSAudioCallback(
+        private static PortAudioSharp.StreamCallbackResult OnMacOSAudioCallback(
             IntPtr input, IntPtr output, uint frameCount,
-            ref PortAudio.StreamCallbackTimeInfo timeInfo,
-            PortAudio.StreamCallbackFlags statusFlags, IntPtr userData)
+            ref StreamCallbackTimeInfo timeInfo,
+            PortAudioSharp.StreamCallbackFlags statusFlags, IntPtr userData)
         {
             if (input != IntPtr.Zero)
             {
@@ -171,7 +171,7 @@ namespace SpeechToTextRealtime
                 }
             }
 
-            return PortAudio.StreamCallbackResult.Continue;
+            return PortAudioSharp.StreamCallbackResult.Continue;
         }
 #endif
 

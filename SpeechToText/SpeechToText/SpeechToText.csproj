@@ -26,7 +26,7 @@
 	<PackageReference Include="NAudio" Version="2.2.1" Condition="$([MSBuild]::IsOSPlatform('Windows'))" />
 
 	<!-- Solo per macOS -->
-	<PackageReference Include="PortAudioSharp" Version="1.0.0" Condition="$([MSBuild]::IsOSPlatform('OSX'))" />
+	<PackageReference Include="PortAudioSharp2" Condition="$([MSBuild]::IsOSPlatform('OSX'))" />
   </ItemGroup>
 	
   <ItemGroup>
